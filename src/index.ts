@@ -18,6 +18,7 @@ interface ArtistInfo {
     end: string | null;
   };
   genres: string[];
+  overview: string | null;
 }
 
 // extract relevant metadata from TiVo API response and adapt to our interface.
@@ -39,11 +40,17 @@ function extractArtistInfo(apiResponse: any): ArtistInfo {
   // Normalize genres to array of strings
   const normalizedGenres = (genresSource || []).map((g: any) => (typeof g === 'string' ? g : g?.name || null)).filter(Boolean) as string[];
 
-  // Expose image through our proxy endpoint to avoid CORS/hotlink issues
-  const proxiedImage = image ? `/api/image?url=${encodeURIComponent(image)}` : null;
+  const overview =
+    artist.musicBio?.headlineBio ||
+    artist.bio ||
+    artist.overview ||
+    null;
+    
+  const originalImage = image || null;
+ 
 
   return {
-    image: proxiedImage,
+    image: originalImage,
     name,
     dateOfBirth,
     birthPlace,
@@ -52,6 +59,7 @@ function extractArtistInfo(apiResponse: any): ArtistInfo {
       end: timeframeEnd,
     },
     genres: normalizedGenres,
+    overview
   };
 }
 // calling Tivo API to fetch metadata based on artist name
@@ -74,38 +82,6 @@ app.get('/api/metadata', async (req: Request, res: Response) => {
   return res.json(artistInfo);
 });
 
-// Image proxy: fetches an external image and pipes it through to the client.
-// Basic allowlist prevents arbitrary URL fetching.
-app.get('/api/image', async (req: Request, res: Response) => {
-  const imageUrl = String(req.query.url || '');
-  if (!imageUrl) return res.status(400).json({ error: 'Missing url parameter' });
-
-  let parsed: URL;
-  try {
-    parsed = new URL(imageUrl);
-  } catch (e) {
-    return res.status(400).json({ error: 'Invalid url parameter' });
-  }
-
-  // Allowlist hosts (expand if you trust other domains)
-  const allowedHosts = ['rovimusic.rovicorp.com'];
-  if (!allowedHosts.includes(parsed.hostname)) {
-    return res.status(400).json({ error: 'Host not allowed' });
-  }
-
-  try {
-    const resp = await fetch(imageUrl);
-    if (!resp.ok) return res.status(502).json({ error: 'Failed to fetch image' });
-    const contentType = resp.headers.get('content-type') || 'application/octet-stream';
-    const buffer = Buffer.from(await resp.arrayBuffer());
-    res.setHeader('Content-Type', contentType);
-    res.setHeader('Cache-Control', 'public, max-age=86400');
-    return res.send(buffer);
-  } catch (err) {
-    console.error('Image proxy error:', err);
-    return res.status(500).json({ error: 'Image proxy failed' });
-  }
-});
 
 app.listen(PORT, () => {
   console.log(`Server running on http://localhost:${PORT}`);
