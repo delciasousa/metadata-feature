@@ -1,6 +1,7 @@
 import type { Request, Response } from 'express';
 import cors from 'cors';
 import express from 'express';
+import { Readable } from 'stream';
 
 const app = express();
 const PORT = Number(process.env.PORT) || 4000;
@@ -23,11 +24,26 @@ interface ArtistInfo {
 
 // extract relevant metadata from TiVo API response and adapt to our interface.
 function extractArtistInfo(apiResponse: any): ArtistInfo {
+  const getImageUrl = (imageObj: any): string | null => {
+    if (!imageObj) return null;
+    if (typeof imageObj === 'string') return imageObj;
+    return imageObj.url || imageObj.href || imageObj.src || imageObj.uri || imageObj.path || null;
+  };
+
   // Support both `artists` and `hits` shapes returned by different endpoints
   const artist = apiResponse?.artists?.[0] || apiResponse?.hits?.[0] || {};
 
-  const images = artist.images || artist.pictures || [];
-  const image = images && images.length ? images[0].url || null : artist.imageUrl || artist.image || null;
+  const rawImageUrl =
+    getImageUrl(artist.images?.[0]) ||
+    getImageUrl(artist.pictures?.[0]) ||
+    getImageUrl(artist.imageUrl) ||
+    getImageUrl(artist.image) ||
+    null;
+
+  const image = rawImageUrl && typeof rawImageUrl === 'string'
+    ? `/api/image?url=${encodeURIComponent(rawImageUrl)}`
+    : null;
+ 
 
   const name = artist.name || '';
   const dateOfBirth = artist.birth?.date || artist.dateOfBirth || artist.birthDate || null;
@@ -45,12 +61,9 @@ function extractArtistInfo(apiResponse: any): ArtistInfo {
     artist.bio ||
     artist.overview ||
     null;
-    
-  const originalImage = image || null;
  
-
   return {
-    image: originalImage,
+    image: image,
     name,
     dateOfBirth,
     birthPlace,
@@ -72,8 +85,12 @@ app.get('/api/metadata', async (req: Request, res: Response) => {
   apiUrl.searchParams.set('name', artist);
   console.log('Requesting external API:', apiUrl.toString());
 
-
-  const response = await fetch(apiUrl.toString());
+  const response = await fetch(apiUrl.toString(), {
+    headers: {
+      'x-tmm-keyid': 'TAC1009',
+      'x-tmm-apikey': 'f18efef12651c9bb089dde93ec28dda4',
+    },
+  });
 
   const data = await response.json();
   console.log('Response:', JSON.stringify(data, null, 2));
@@ -82,6 +99,45 @@ app.get('/api/metadata', async (req: Request, res: Response) => {
   return res.json(artistInfo);
 });
 
+app.get('/api/image', async (req: Request, res: Response) => {
+  const imageUrl = String(req.query.url || '');
+  if (!imageUrl) {
+    return res.status(400).json({ error: 'Missing image URL' });
+  }
+
+  let parsedUrl: URL;
+  
+  parsedUrl = new URL(imageUrl);
+
+  const imageResponse = await fetch(parsedUrl.toString(), {
+    headers: {
+      'x-tmm-keyid': 'TAC1009',
+      'x-tmm-apikey': 'f18efef12651c9bb089dde93ec28dda4',
+    },
+  });
+
+  if (!imageResponse.ok) {
+    const message = await imageResponse.text();
+    return res.status(imageResponse.status).send(message);
+  }
+
+  const contentType = imageResponse.headers.get('content-type');
+  if (contentType) {
+    res.setHeader('Content-Type', contentType);
+  }
+  const contentLength = imageResponse.headers.get('content-length');
+  if (contentLength) {
+    res.setHeader('Content-Length', contentLength);
+  }
+
+  const body = imageResponse.body;
+  if (!body) {
+    return res.status(500).json({ error: 'Missing image response body' });
+  }
+
+  const nodeStream = Readable.fromWeb(body as any);
+  nodeStream.pipe(res);
+});
 
 app.listen(PORT, () => {
   console.log(`Server running on http://localhost:${PORT}`);
