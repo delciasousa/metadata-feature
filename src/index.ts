@@ -11,6 +11,7 @@ app.use(express.json());
 
 interface ArtistInfo {
   image: string | null;
+  images: string[];
   name: string;
   dateOfBirth: string | null;
   birthPlace: string | null;
@@ -24,27 +25,39 @@ interface ArtistInfo {
 
 // extract relevant metadata from TiVo API response and adapt to our interface.
 function extractArtistInfo(apiResponse: any): ArtistInfo {
+  // extract image url from various
   const getImageUrl = (imageObj: any): string | null => {
     if (!imageObj) return null;
     if (typeof imageObj === 'string') return imageObj;
-    return imageObj.url || imageObj.href || imageObj.src || imageObj.uri || imageObj.path || null;
+    return imageObj.url;
+  };
+
+  // handling cases where images could be an array of objects, single objects, or array of strings
+  const getImageUrls = (imageObj: any): string[] => {
+    if (!imageObj) return [];
+    if (Array.isArray(imageObj)) {
+      return imageObj
+        .map((item) => getImageUrl(item))
+        .filter(Boolean) as string[];
+    }
+    const url = getImageUrl(imageObj);
+    return url ? [url] : [];
   };
 
   // Support both `artists` and `hits` shapes returned by different endpoints
   const artist = apiResponse?.artists?.[0] || apiResponse?.hits?.[0] || {};
 
-  const rawImageUrl =
-    getImageUrl(artist.images?.[0]) ||
-    getImageUrl(artist.pictures?.[0]) ||
-    getImageUrl(artist.imageUrl) ||
-    getImageUrl(artist.image) ||
-    null;
+  const rawImageUrls = [
+    ...getImageUrls(artist.images),
+    ...getImageUrls(artist.pictures),
+    ...getImageUrls(artist.imageUrl),
+    ...getImageUrls(artist.image),
+  ];
 
-  const image = rawImageUrl && typeof rawImageUrl === 'string'
-    ? `/api/image?url=${encodeURIComponent(rawImageUrl)}`
-    : null;
+  const uniqueImageUrls = Array.from(new Set(rawImageUrls));
+  const images = uniqueImageUrls.map((url) => `/api/image?url=${encodeURIComponent(url)}`);
+  const image = images[0] ?? null;
  
-
   const name = artist.name || '';
   const dateOfBirth = artist.birth?.date || artist.dateOfBirth || artist.birthDate || null;
   const birthPlace = artist.birth?.place || artist.birthPlace || artist.placeOfBirth || null;
@@ -63,7 +76,8 @@ function extractArtistInfo(apiResponse: any): ArtistInfo {
     null;
  
   return {
-    image: image,
+    image,
+    images,
     name,
     dateOfBirth,
     birthPlace,
@@ -99,6 +113,10 @@ app.get('/api/metadata', async (req: Request, res: Response) => {
   return res.json(artistInfo);
 });
 
+
+
+
+// Proxy endpoint to fetch images from Tivo API and stream them back to frontend.
 app.get('/api/image', async (req: Request, res: Response) => {
   const imageUrl = String(req.query.url || '');
   if (!imageUrl) {
@@ -106,7 +124,6 @@ app.get('/api/image', async (req: Request, res: Response) => {
   }
 
   let parsedUrl: URL;
-  
   parsedUrl = new URL(imageUrl);
 
   const imageResponse = await fetch(parsedUrl.toString(), {
@@ -120,7 +137,6 @@ app.get('/api/image', async (req: Request, res: Response) => {
     const message = await imageResponse.text();
     return res.status(imageResponse.status).send(message);
   }
-
   const contentType = imageResponse.headers.get('content-type');
   if (contentType) {
     res.setHeader('Content-Type', contentType);
@@ -129,7 +145,6 @@ app.get('/api/image', async (req: Request, res: Response) => {
   if (contentLength) {
     res.setHeader('Content-Length', contentLength);
   }
-
   const body = imageResponse.body;
   if (!body) {
     return res.status(500).json({ error: 'Missing image response body' });
@@ -138,6 +153,7 @@ app.get('/api/image', async (req: Request, res: Response) => {
   const nodeStream = Readable.fromWeb(body as any);
   nodeStream.pipe(res);
 });
+
 
 app.listen(PORT, () => {
   console.log(`Server running on http://localhost:${PORT}`);
