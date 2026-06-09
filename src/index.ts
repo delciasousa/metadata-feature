@@ -23,6 +23,12 @@ interface ArtistInfo {
   overview: string | null;
 }
 
+interface AlbumInfo {
+  title: string;
+  releaseDate: string | null;
+  image: string | null;
+}
+
 // extract relevant metadata from TiVo API response and adapt to our interface.
 function extractArtistInfo(apiResponse: any): ArtistInfo {
   // extract image url from various
@@ -89,6 +95,60 @@ function extractArtistInfo(apiResponse: any): ArtistInfo {
     overview
   };
 }
+
+
+// extract album data
+function extractAlbumInfo(apiResponse: any): AlbumInfo[] {
+  const albums =
+    apiResponse?.albums ||
+    apiResponse?.hits ||
+    apiResponse?.data ||
+    apiResponse?.results ||
+    [];
+
+  if (!Array.isArray(albums)) {
+    return [];
+  }
+
+  return albums.map((album: any) => {
+    const title = album.title || album.name || album.albumTitle || '';
+    const releaseDate = album.releaseDate || album.date || album.year || null;
+
+    const imageUrl =
+      album.imageUrl ||
+      album.image ||
+      album.cover ||
+      (album.images?.[0]?.url ?? null);
+
+    return {
+      title,
+      releaseDate,
+      image: imageUrl
+        ? `/api/image?url=${encodeURIComponent(imageUrl)}`
+        : null,
+    };
+  });
+}
+
+
+// extract album data from artist
+function extractAlbumsFromArtist(apiResponse: any): AlbumInfo[] {
+  const artist = apiResponse?.artists?.[0] || apiResponse?.hits?.[0] || {};
+  const albumEntries =
+    artist.albums ||
+    artist.releases ||
+    artist.discography ||
+    artist.records ||
+    [];
+
+  if (!Array.isArray(albumEntries)) {
+    return [];
+  }
+
+  return extractAlbumInfo({ albums: albumEntries });
+}
+
+
 // calling Tivo API to fetch metadata based on artist name
 app.get('/api/metadata', async (req: Request, res: Response) => {
   const artist = String(req.query.artist || '');
@@ -107,12 +167,43 @@ app.get('/api/metadata', async (req: Request, res: Response) => {
   });
 
   const data = await response.json();
-  console.log('Response:', JSON.stringify(data, null, 2));
-  
+  //console.log('Response:', JSON.stringify(data, null, 2));
   const artistInfo = extractArtistInfo(data);
-  return res.json(artistInfo);
-});
+  let albums: AlbumInfo[] = [];
 
+  try {
+    const albumUrl = new URL(
+      'https://tivomusicapi-staging-elb.digitalsmiths.net/sd/db9c86353d2aa209/taps/v3/search/album'
+    );
+    albumUrl.searchParams.set('title', artist);
+    albumUrl.searchParams.set('primaryArtist', artist);
+    albumUrl.searchParams.set('limit', '20');
+    albumUrl.searchParams.set('offset', '0');
+
+    console.log('Requesting album API:', albumUrl.toString());
+    const albumResponse = await fetch(albumUrl.toString());
+    const albumData = await albumResponse.json();
+    albums = extractAlbumInfo(albumData);
+
+    console.log('Album API response count:', albums.length);
+  } catch (error) {
+    console.warn('Album API fetch failed, falling back to artist payload:', error);
+  }
+
+  if (!albums.length) {
+    albums = extractAlbumsFromArtist(data);
+    if (albums.length) {
+      console.log('Falling back to artist payload album metadata.');
+    } else {
+      console.log('No album metadata found in either album API or artist payload.');
+    }
+  }
+  console.log('Final metadata response:', JSON.stringify(albums, null, 2));
+  return res.json({
+    ...artistInfo,
+    albums,
+  });
+});
 
 
 
