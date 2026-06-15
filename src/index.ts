@@ -13,6 +13,7 @@ interface ArtistInfo {
   image: string | null;
   images: string[];
   name: string;
+  nameId: string;
   dateOfBirth: string | null;
   birthPlace: string | null;
   timeframeAsArtist: {
@@ -27,6 +28,26 @@ interface AlbumInfo {
   title: string;
   releaseDate: string | null;
   image: string | null;
+}
+
+interface TrackInfo {
+  title: string;
+  artist: string | null;
+}
+
+// extract track metadata from TiVo API response and return the first 5 singles
+function extractTrackInfo(apiResponse: any): TrackInfo[] {
+  const tracks = Array.isArray(apiResponse?.hits) ? apiResponse.hits : [];
+
+  return tracks.slice(1, 6).map((track: any) => ({
+    title: track.title || track.name || '',
+    artist:
+      Array.isArray(track.primaryArtists)
+        ? track.primaryArtists.map((a: any) => a?.name).filter(Boolean).join(', ')
+        : typeof track.primaryArtist === 'object'
+        ? track.primaryArtist?.name || null
+        : null,
+  }));
 }
 
 // extract relevant metadata from TiVo API response and adapt to our interface.
@@ -74,6 +95,7 @@ function extractArtistInfo(apiResponse: any): ArtistInfo {
   const genresSource = artist.musicGenres || artist.genres || artist.style || [];
   // Normalize genres to array of strings
   const normalizedGenres = (genresSource || []).map((g: any) => (typeof g === 'string' ? g : g?.name || null)).filter(Boolean) as string[];
+  const nameId = artist.nameId || artist.id || artist.artistId || null;
 
   const overview =
     artist.musicBio?.headlineBio ||
@@ -85,6 +107,7 @@ function extractArtistInfo(apiResponse: any): ArtistInfo {
     image,
     images,
     name,
+    nameId,
     dateOfBirth,
     birthPlace,
     timeframeAsArtist: {
@@ -148,16 +171,25 @@ function extractAlbumsFromArtist(apiResponse: any): AlbumInfo[] {
   return extractAlbumInfo({ albums: albumEntries });
 }
 
-
 // calling Tivo API to fetch metadata based on artist name
 app.get('/api/metadata', async (req: Request, res: Response) => {
   const artist = String(req.query.artist || '');
+  const title = String(
+    req.query.title ||
+    req.query.track ||
+    req.query.song ||
+    req.query.trackName ||
+    ''
+  );
+  const primaryArtistId = String(req.query.primaryArtistId || '');
+  const nameId = String(req.query.nameId || '');
+  const includeAllFields = String(req.query.includeAllFields || '');
   const apiUrl = new URL(
     'https://tivomusicapi-staging-elb.digitalsmiths.net/sd/db9c86353d2aa209/taps/v3/search/artist'
   );
 
   apiUrl.searchParams.set('name', artist);
-  console.log('Requesting external API:', apiUrl.toString());
+  //console.log('Requesting external API:', apiUrl.toString());
 
   const response = await fetch(apiUrl.toString(), {
     headers: {
@@ -169,6 +201,8 @@ app.get('/api/metadata', async (req: Request, res: Response) => {
   const data = await response.json();
   //console.log('Response:', JSON.stringify(data, null, 2));
   const artistInfo = extractArtistInfo(data);
+  const resolvedNameId = nameId || artistInfo.nameId;
+  console.log('Resolved nameId for discography:', resolvedNameId);
   let albums: AlbumInfo[] = [];
 
   try {
@@ -180,7 +214,7 @@ app.get('/api/metadata', async (req: Request, res: Response) => {
     albumUrl.searchParams.set('limit', '20');
     albumUrl.searchParams.set('offset', '0');
 
-    console.log('Requesting album API:', albumUrl.toString());
+    //console.log('Requesting album API:', albumUrl.toString());
     const albumResponse = await fetch(albumUrl.toString());
     const albumData = await albumResponse.json();
     albums = extractAlbumInfo(albumData);
@@ -198,10 +232,47 @@ app.get('/api/metadata', async (req: Request, res: Response) => {
       console.log('No album metadata found in either album API or artist payload.');
     }
   }
-  console.log('Final metadata response:', JSON.stringify(albums, null, 2));
+  
+  console.log('Discography query parameters:', { resolvedNameId});
+  let trackInfo: TrackInfo[] = [];
+  if (resolvedNameId || title) {
+    try {
+      const trackUrl = new URL('https://tivomusicapi-staging-elb.digitalsmiths.net/sd/db9c86353d2aa209/taps/v3/lookup/discography');
+      if (resolvedNameId) {  
+        trackUrl.searchParams.set('nameId', resolvedNameId);
+      }
+      trackUrl.searchParams.set('type', 'Single');
+      trackUrl.searchParams.set('limit', '100');
+      if (includeAllFields.toLowerCase() === 'true') {
+        trackUrl.searchParams.set('includeAllFields', 'true');
+      }
+
+      console.log('Requesting track API:', trackUrl.toString());
+      const trackResponse = await fetch(trackUrl.toString(), {
+        headers: {
+          'Accept': '*/*',
+          'x-tmm-keyid': 'TAC1009',
+          'x-tmm-apikey': 'f18efef12651c9bb089dde93ec28dda4',
+        },
+      });
+      
+      if (trackResponse.ok) {
+        const trackData = await trackResponse.json();
+        console.log('Track API raw response:', JSON.stringify(trackData, null, 2));
+        trackInfo = extractTrackInfo(trackData);
+        console.log('Track info:', trackInfo);
+      } else {
+        console.warn('Track API returned status:', trackResponse.status);
+      }
+    } catch (error) {
+      console.warn('Track API fetch failed:', error);
+    }
+  }
+  //console.log('Final metadata response:',JSON.stringify(albums, null, 2));
   return res.json({
     ...artistInfo,
     albums,
+    trackInfo,
   });
 });
 
