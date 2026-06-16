@@ -35,6 +35,9 @@ interface AlbumInfo {
 interface TrackInfo {
   title: string;
   artist: string | null;
+  duration: number | null;
+  mainReleaseId: string | null;
+  image?: string | null;  
 }
 
 // extract track metadata from TiVo API response and return the first 5 singles
@@ -43,12 +46,19 @@ function extractTrackInfo(apiResponse: any): TrackInfo[] {
 
   return tracks.slice(1, 6).map((track: any) => ({
     title: track.title || track.name || '',
+
     artist:
       Array.isArray(track.primaryArtists)
-        ? track.primaryArtists.map((a: any) => a?.name).filter(Boolean).join(', ')
+        ? track.primaryArtists
+            .map((a: any) => a?.name)
+            .filter(Boolean)
+            .join(', ')
         : typeof track.primaryArtist === 'object'
         ? track.primaryArtist?.name || null
         : null,
+
+    duration: track.duration ?? null,
+    mainReleaseId: track.ids?.mainReleaseId ?? null,
   }));
 }
 
@@ -130,6 +140,32 @@ function extractArtistInfo(apiResponse: any): ArtistInfo {
   };
 }
 
+
+async function fetchReleaseImage(releaseId: string) {
+  const url = new URL('https://tivomusicapi-staging-elb.digitalsmiths.net/sd/db9c86353d2aa209/taps/v3/lookup/release');
+  url.searchParams.set('releaseId', releaseId);
+
+  const res = await fetch(url.toString(), {
+    headers: {
+      'Accept': '*/*',
+      'x-tmm-keyid': 'TAC1009',
+      'x-tmm-apikey': 'f18efef12651c9bb089dde93ec28dda4',
+    },
+  });
+
+  if (!res.ok) return null;
+
+  const data = await res.json();
+
+  const rawImage = data.hits?.[0]?.images?.[0]?.url;
+
+  if (!rawImage) return null;
+
+  const cleaned = rawImage.replace(/&amp;/g, '&');
+
+  // return your proxy URL
+  return `/api/image?url=${encodeURIComponent(cleaned)}`;
+}
 
 // extract album data
 function extractAlbumInfo(apiResponse: any): AlbumInfo[] {
@@ -230,13 +266,13 @@ if (nameId) {
     albums = extractAlbumInfo(albumData);
 
     //console.log('Album API response count:', albums);
-    console.log('Album API raw response:', JSON.stringify(albumData, null, 2));
+    //console.log('Album API raw response:', JSON.stringify(albumData, null, 2));
   } catch (error) {
     console.warn('Album API fetch failed, falling back to artist payload:', error);
   }
 
 
-  console.log('Discography query parameters:', { resolvedNameId});
+  //console.log('Discography query parameters:', { resolvedNameId});
   let trackInfo: TrackInfo[] = [];
   if (resolvedNameId || title) {
       const trackUrl = new URL('https://tivomusicapi-staging-elb.digitalsmiths.net/sd/db9c86353d2aa209/taps/v3/lookup/discography');
@@ -261,13 +297,49 @@ if (nameId) {
       
       if (trackResponse.ok) {
         const trackData = await trackResponse.json();
-        console.log('Track API raw response:', JSON.stringify(trackData, null, 2));
+        //console.log('Track API raw response:', JSON.stringify(trackData, null, 2));
         trackInfo = extractTrackInfo(trackData);
-        //console.log('Tracks info:', trackInfo);
-      } else {
-        console.warn('Track API returned status:', trackResponse.status);
+
+        // enrich singles with release images
+        trackInfo = await Promise.all(
+          trackInfo.map(async (track) => {
+            if (!track.mainReleaseId) return track;
+
+            try {
+              const url = new URL('https://tivomusicapi-staging-elb.digitalsmiths.net/sd/db9c86353d2aa209/taps/v3/lookup/release');
+              url.searchParams.set('releaseId', track.mainReleaseId);
+
+              const res = await fetch(url.toString(), {
+                headers: {
+                  'Accept': '*/*',
+                  'x-tmm-keyid': 'TAC1009',
+                  'x-tmm-apikey': 'f18efef12651c9bb089dde93ec28dda4',
+                },
+              });
+              
+              if (!res.ok) return track;
+
+              const data = await res.json();
+              //console.log('Release lookup response:', JSON.stringify(data, null, 1));
+
+              const image = await fetchReleaseImage(track.mainReleaseId);
+              return {
+                ...track,
+                image, 
+              };
+              
+            } catch (err) {
+              console.warn('Error fetching release image:', err);
+              return track;
+            }
+
+          })
+        );
+        console.log('Enriched trackInfo:', JSON.stringify(trackInfo, null, 2));
       }
-  }
+      
+    }
+ 
   //console.log('Final metadata response:',JSON.stringify(albums, null, 2));
   return res.json({
     ...artistInfo,
