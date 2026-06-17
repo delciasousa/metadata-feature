@@ -29,7 +29,12 @@ interface ArtistInfo {
 interface AlbumInfo {
   title: string;
   releaseDate: string | null;
+  flags: string[];
   image: string | null;
+  primaryArtists: string[] | null;
+  genres: string[] | null;
+  tracks: string [] | null;
+
 }
 
 interface TrackInfo {
@@ -70,7 +75,6 @@ function extractArtistInfo(apiResponse: any): ArtistInfo {
     if (typeof imageObj === 'string') return imageObj;
     return imageObj.url;
   };
-
   // handling cases where images could be an array of objects, single objects, or array of strings
   const getImageUrls = (imageObj: any): string[] => {
     if (!imageObj) return [];
@@ -82,10 +86,8 @@ function extractArtistInfo(apiResponse: any): ArtistInfo {
     const url = getImageUrl(imageObj);
     return url ? [url] : [];
   };
-
   // Support both `artists` and `hits` shapes returned by different endpoints
   const artist = apiResponse?.artists?.[0] || apiResponse?.hits?.[0] || {};
-
   const rawImageUrls = [
     ...getImageUrls(artist.images),
     ...getImageUrls(artist.pictures),
@@ -182,7 +184,8 @@ function extractAlbumInfo(apiResponse: any): AlbumInfo[] {
 
   return albums.map((album: any) => {
     const title = album.title || album.name || album.albumTitle || '';
-    const releaseDate = album.originalReleaseDate || album.date || album.year || null;
+    const releaseDate =
+      album.originalReleaseDate || album.date || album.year || null;
 
     const imageUrl =
       album.imageUrl ||
@@ -190,17 +193,29 @@ function extractAlbumInfo(apiResponse: any): AlbumInfo[] {
       album.cover ||
       (album.images?.[0]?.url ?? null);
 
+    const primaryArtists = album.primaryArtists?.map((artist: any) => artist.name) || [];
+
+    const genres = album.genres?.map((genre: any) => genre.name) || [];
+    const tracks = album.tracks?.map((track: any) => ({
+        title: track.title,
+        duration: track.duration,
+        performers:
+          track.performers?.map((p: any) => p.name) || [],
+      })) || [];
+
     return {
       title,
       releaseDate,
+      flags: album.flags || [],
       image: imageUrl
         ? `/api/image?url=${encodeURIComponent(imageUrl)}`
         : null,
+      primaryArtists,
+      genres,
+      tracks,
     };
   });
 }
-
-
 
 // calling Tivo API to fetch metadata based on artist name
 app.get('/api/metadata', async (req: Request, res: Response) => {
@@ -243,7 +258,7 @@ if (nameId) {
   });
 
   const data = await response.json();
-  //console.log('Response:', JSON.stringify(data, null, 2));
+  console.log('Response:', JSON.stringify(data, null, 2));
   const artistInfo = extractArtistInfo(data);
   const resolvedNameId = nameId || artistInfo.nameId;
   const artistName = artist || artistInfo.name;
@@ -263,7 +278,12 @@ if (nameId) {
     //console.log('Requesting album API:', albumUrl.toString());
     const albumResponse = await fetch(albumUrl.toString());
     const albumData = await albumResponse.json();
-    albums = extractAlbumInfo(albumData);
+    albums = extractAlbumInfo(albumData).filter(album =>
+      Array.isArray(album.flags) &&
+      album.flags.some(flag =>
+        flag.toLowerCase().includes("studio")
+      )
+    );
 
     //console.log('Album API response count:', albums);
     //console.log('Album API raw response:', JSON.stringify(albumData, null, 2));
@@ -327,15 +347,13 @@ if (nameId) {
                 ...track,
                 image, 
               };
-              
             } catch (err) {
               console.warn('Error fetching release image:', err);
               return track;
             }
-
           })
         );
-        console.log('Enriched trackInfo:', JSON.stringify(trackInfo, null, 2));
+        //console.log('Enriched trackInfo:', JSON.stringify(trackInfo, null, 2));
       }
       
     }
