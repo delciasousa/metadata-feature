@@ -34,7 +34,8 @@ interface AlbumInfo {
   image: string | null;
   primaryArtists: { name: string; id: string | null }[];
   genres: string[] | null;
-  tracks: string [] | null;
+  tracks: Track[];
+  allCredits: Credit[];
 
 }
 
@@ -52,6 +53,24 @@ interface  SimilarAlbumInfo{
   artist: string;
   image: string | null;
 }
+
+type Credit = {
+  name: string;
+  nameID: string | null;
+  roleID: string | null;
+  role: string;
+};
+
+type Track = {
+  id: string;
+  title: string;
+  duration: number;
+  performers: string[];
+  image: string | null;
+};
+
+
+
 // extract track metadata from TiVo API response and return the first 5 singles
 function extractTrackInfo(apiResponse: any): TrackInfo[] {
   const tracks = Array.isArray(apiResponse?.hits) ? apiResponse.hits : [];
@@ -216,28 +235,66 @@ async function extractAlbumInfo(apiResponse: any): Promise<AlbumInfo[]> {
         ? `/api/image?url=${encodeURIComponent(imageUrl)}`
         : null;
 
-      const tracks = (album.tracks || []).map((track: any) => {
+      const globalCreditsMap = new Map<string, Credit>();
+
+      const tracks = (album.tracks ?? []).map((track: any) => {
         const performers = [
           ...new Set(
-            (track.performers || [])
+            (track.performers ?? [])
               .filter(
                 (p: any) =>
-                  p.role === "Primary Artist" ||
-                  p.role === "Featured Artist"
+                  p?.role === "Primary Artist" ||
+                  p?.role === "Featured Artist"
               )
-              .map((p: any) => p.name)
+              .map((p: any) => p?.name)
           ),
         ];
 
         return {
-          id: track.id,
-          title: track.title,
-          duration: track.duration,
+          id: track?.id ?? "",
+          title: track?.title ?? "",
+          duration: track?.duration ?? 0,
           performers,
-          image: albumImage, 
+          image: albumImage,
         };
       });
+      
+      const primaryArtistIds = new Set(
+        (album.primaryArtists ?? [])
+          .map((a: { id: string | null }) => a.id)
+          .filter((id: string | null): id is string => id !== null)
+      );
 
+      const primaryArtistNames = new Set(
+        (album.primaryArtists ?? [])
+          .map((a: { name: string }) => a.name.toLowerCase())
+      );
+
+      const allCredits: Credit[] = [
+        ...new Map<string, Credit>(
+          (album.tracks ?? [])
+            .flatMap((track: any) => track.performers ?? [])
+            .filter((p: any) => {
+              if (!p) return false;
+               
+              // exclude artists name
+              if (p.nameID && primaryArtistIds.has(p.nameID)) return false;
+
+              if (p.name && primaryArtistNames.has(p.name.toLowerCase())) return false;
+
+              return true;
+            })
+            .map((p: any) => [
+              `${p.nameID ?? p.name}`,
+              {
+                name: p.name ?? "",
+                nameID: p.nameID ?? null,
+                roleID: p.roleID ?? null,
+                role: p.role ?? "",
+              },
+            ])
+        ).values(),
+      ];
 
       return {
         id: album.id,
@@ -250,6 +307,7 @@ async function extractAlbumInfo(apiResponse: any): Promise<AlbumInfo[]> {
         primaryArtists,
         genres,
         tracks,
+        allCredits, 
       };
     })
   );
@@ -303,6 +361,7 @@ function extractSimilarAlbumsInfo(apiResponse: any): SimilarAlbumInfo[] {
   });
 }
 
+
 // calling Tivo API to fetch metadata based on artist name
 app.get('/api/metadata', async (req: Request, res: Response) => {
   const artist = String(req.query.artist || '');
@@ -319,14 +378,14 @@ app.get('/api/metadata', async (req: Request, res: Response) => {
   const albumId = String(req.query.albumId || '');
  
   let apiUrl;
-
+// ARTIST INFORMATION API - ID RETRIEVAL 
 if (nameId) {
   // endpoint for ID lookup
   apiUrl = new URL(
     'https://tivomusicapi-staging-elb.digitalsmiths.net/sd/db9c86353d2aa209/taps/v3/lookup/artist'
   );
   apiUrl.searchParams.set('nameId', nameId);
-
+// ARTIST INFORMATION API - NAME RETRIEVAL 
 } else {
   //  endpoint for name search
   apiUrl = new URL(
@@ -335,7 +394,7 @@ if (nameId) {
   apiUrl.searchParams.set('name', artist);
 }
 
-  //console.log('Requesting external API:', apiUrl.toString());
+  // console.log('Requesting external API:', apiUrl.toString());
 
   const response = await fetch(apiUrl.toString(), {
     headers: {
@@ -374,7 +433,7 @@ if (nameId) {
       selectedAlbum = extracted[0] || null;
     }
   }
-
+  // ALBUMS INFORMATION API CALL
   let albums: AlbumInfo[] = [];
   try {
     const albumUrl = new URL(
@@ -404,14 +463,16 @@ if (nameId) {
       }
     }
 
-    console.log('Album API response count:', albums, null, 2);
-    //console.log('Album API raw response:', JSON.stringify(albumData, null, 2));
+    //console.log('Album API response count:', albums, null, 2);
+
+    console.log('Album API raw response:', JSON.stringify(albumData, null, 2));
   } catch (error) {
     console.warn('Album API fetch failed, falling back to artist payload:', error);
   }
 
 
   //console.log('Discography query parameters:', { resolvedNameId});
+  // TRACKS INFORMATION API CALL
   let trackInfo: TrackInfo[] = [];
   if (resolvedNameId || title) {
       const trackUrl = new URL('https://tivomusicapi-staging-elb.digitalsmiths.net/sd/db9c86353d2aa209/taps/v3/lookup/discography');
@@ -477,6 +538,7 @@ if (nameId) {
       
     }
     //console.log('Final metadata response:',JSON.stringify(albums, null, 2));
+    // SIMILAR ALBUMS INFORMATION API CALL
     let similarAlbumInfo: SimilarAlbumInfo[] = [];
 
     if (albums.length) {
