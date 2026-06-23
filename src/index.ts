@@ -208,7 +208,6 @@ async function extractAlbumInfo(apiResponse: any): Promise<AlbumInfo[]> {
     return [];
   }
 
-
   return await Promise.all(
     albums.map(async (album: any) => {
       const title = album.title || album.name || album.albumTitle || '';
@@ -249,7 +248,6 @@ async function extractAlbumInfo(apiResponse: any): Promise<AlbumInfo[]> {
               .map((p: any) => p?.name)
           ),
         ];
-
         return {
           id: track?.id ?? "",
           title: track?.title ?? "",
@@ -270,16 +268,14 @@ async function extractAlbumInfo(apiResponse: any): Promise<AlbumInfo[]> {
           .map((a: { name: string }) => a.name.toLowerCase())
       );
 
-      const allCredits: Credit[] = [
+      const rawCredits = [
         ...new Map<string, Credit>(
           (album.tracks ?? [])
             .flatMap((track: any) => track.performers ?? [])
             .filter((p: any) => {
               if (!p) return false;
-               
-              // exclude artists name
-              if (p.nameID && primaryArtistIds.has(p.nameID)) return false;
 
+              if (p.nameID && primaryArtistIds.has(p.nameID)) return false;
               if (p.name && primaryArtistNames.has(p.name.toLowerCase())) return false;
 
               return true;
@@ -295,7 +291,49 @@ async function extractAlbumInfo(apiResponse: any): Promise<AlbumInfo[]> {
             ])
         ).values(),
       ];
+      const allCredits = await Promise.all(
+        rawCredits.map(async (credit) => {
+          try {
+            let apiUrl; // ✅ FIX
 
+            if (credit.nameID) {
+              apiUrl = new URL(
+                "https://tivomusicapi-staging-elb.digitalsmiths.net/sd/db9c86353d2aa209/taps/v3/lookup/artist"
+              );
+              apiUrl.searchParams.set("nameId", credit.nameID);
+            } else {
+              apiUrl = new URL(
+                "https://tivomusicapi-staging-elb.digitalsmiths.net/sd/db9c86353d2aa209/taps/v3/search/artist"
+              );
+              apiUrl.searchParams.set("name", credit.name);
+            }
+
+            const response = await fetch(apiUrl.toString(), {
+              headers: {
+                "x-tmm-keyid": "TAC1009",
+                "x-tmm-apikey": "f18efef12651c9bb089dde93ec28dda4",
+              },
+            });
+
+            const data = await response.json();
+            const artistInfo = extractArtistInfo(data);
+
+            return {
+              ...credit,
+              image: artistInfo.image,
+            };
+
+          } catch (err) {
+            console.log("Failed to fetch credit artist:", credit.name);
+
+            return {
+              ...credit,
+              image: null,
+            };
+          }
+        })
+      );
+      
       return {
         id: album.id,
         title,
@@ -312,6 +350,8 @@ async function extractAlbumInfo(apiResponse: any): Promise<AlbumInfo[]> {
     })
   );
 }
+
+
 
 function extractSimilarAlbumsInfo(apiResponse: any): SimilarAlbumInfo[] {
   const albums =
