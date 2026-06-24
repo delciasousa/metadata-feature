@@ -40,11 +40,12 @@ interface AlbumInfo {
 }
 
 interface TrackInfo {
+  id: string;
   title: string;
-  artist: string | null;
-  duration: number | null;
-  mainReleaseId: string | null;
-  image?: string | null;  
+  duration: number;
+  performers: string[];
+  image: string | null;
+  albumId: string | null;
 }
 
 interface  SimilarAlbumInfo{
@@ -75,23 +76,34 @@ type Track = {
 function extractTrackInfo(apiResponse: any): TrackInfo[] {
   const tracks = Array.isArray(apiResponse?.hits) ? apiResponse.hits : [];
 
-  return tracks.slice(1, 6).map((track: any) => ({
-    title: track.title || track.name || '',
-
-    artist:
-      Array.isArray(track.primaryArtists)
-        ? track.primaryArtists
-            .map((a: any) => a?.name)
-            .filter(Boolean)
-            .join(', ')
-        : typeof track.primaryArtist === 'object'
-        ? track.primaryArtist?.name || null
-        : null,
-
-    duration: track.duration ?? null,
-    mainReleaseId: track.ids?.mainReleaseId ?? null,
-  }));
+  return tracks.slice(1, 6).map((track: any) =>
+    normalizeTrack(track)
+  );
 }
+
+function normalizeTrack(track: any, image: string | null = null) {
+  const performers = Array.isArray(track.primaryArtists)
+    ? track.primaryArtists.map((a: any) => a?.name).filter(Boolean)
+    : Array.isArray(track.performers)
+    ? track.performers
+        .filter(
+          (p: any) =>
+            p?.role === "Primary Artist" ||
+            p?.role === "Featured Artist"
+        )
+        .map((p: any) => p?.name)
+    : [];
+
+  return {
+    id: track?.id ?? track?.ids?.trackId ?? "",
+    title: track?.title || track?.name || "",
+    duration: track?.duration ?? 0,
+    performers,
+    image,
+    albumId: track?.ids?.mainReleaseId ?? null,
+  };
+}
+
 
 // extract relevant metadata from TiVo API response and adapt to our interface.
 function extractArtistInfo(apiResponse: any): ArtistInfo {
@@ -236,27 +248,10 @@ async function extractAlbumInfo(apiResponse: any): Promise<AlbumInfo[]> {
 
       const globalCreditsMap = new Map<string, Credit>();
 
-      const tracks = (album.tracks ?? []).map((track: any) => {
-        const performers = [
-          ...new Set(
-            (track.performers ?? [])
-              .filter(
-                (p: any) =>
-                  p?.role === "Primary Artist" ||
-                  p?.role === "Featured Artist"
-              )
-              .map((p: any) => p?.name)
-          ),
-        ];
-        return {
-          id: track?.id ?? "",
-          title: track?.title ?? "",
-          duration: track?.duration ?? 0,
-          performers,
-          image: albumImage,
-        };
-      });
-      
+      const tracks = (album.tracks ?? []).map((track: any) =>
+        normalizeTrack(track, albumImage)
+      );
+            
       const primaryArtistIds = new Set(
         (album.primaryArtists ?? [])
           .map((a: { id: string | null }) => a.id)
@@ -294,7 +289,7 @@ async function extractAlbumInfo(apiResponse: any): Promise<AlbumInfo[]> {
       const allCredits = await Promise.all(
         rawCredits.map(async (credit) => {
           try {
-            let apiUrl; // ✅ FIX
+            let apiUrl; 
 
             if (credit.nameID) {
               apiUrl = new URL(
@@ -543,11 +538,11 @@ if (nameId) {
         // enrich singles with release images
         trackInfo = await Promise.all(
           trackInfo.map(async (track) => {
-            if (!track.mainReleaseId) return track;
+            if (!track.albumId) return track;
 
             try {
               const url = new URL('https://tivomusicapi-staging-elb.digitalsmiths.net/sd/db9c86353d2aa209/taps/v3/lookup/release');
-              url.searchParams.set('releaseId', track.mainReleaseId);
+              url.searchParams.set('releaseId', track.albumId);
 
               const res = await fetch(url.toString(), {
                 headers: {
@@ -562,7 +557,7 @@ if (nameId) {
               const data = await res.json();
               //console.log('Release lookup response:', JSON.stringify(data, null, 1));
 
-              const image = await fetchReleaseImage(track.mainReleaseId);
+              const image = await fetchReleaseImage(track.albumId);
               return {
                 ...track,
                 image, 
