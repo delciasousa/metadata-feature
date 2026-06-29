@@ -104,6 +104,31 @@ function normalizeTrack(track: any, image: string | null = null) {
   };
 }
 
+function normalizeFullTrack(raw: any) {
+  return raw
+    ? {
+        id: raw.id,
+        title: raw.title,
+        duration: raw.duration ?? 0,
+
+        performers: raw.performers
+          ?.map((p: any) => p?.name)
+          ?.filter(Boolean) || [],
+
+        image: raw.images?.[0]?.url
+          ? `/api/image?url=${encodeURIComponent(
+              raw.images[0].url.replace(/&amp;/g, "&")
+            )}`
+          : null,
+
+        albumId: raw.ids?.albumId ?? null,
+        genres: raw.song?.[0]?.genres?.map((g: any) => g.name) || [],
+        moods: raw.song?.[0]?.moods?.map((m: any) => m.name) || [],
+        themes: raw.song?.[0]?.themes?.map((t: any) => t.name) || [],
+        year: raw.song?.[0]?.year ?? null,
+      }
+    : null;
+}
 
 // extract relevant metadata from TiVo API response and adapt to our interface.
 function extractArtistInfo(apiResponse: any): ArtistInfo {
@@ -397,7 +422,7 @@ function extractSimilarAlbumsInfo(apiResponse: any): SimilarAlbumInfo[] {
 }
 
 
-// calling Tivo API to fetch metadata based on artist name
+// calling Tivo API to fetch metadata
 app.get('/api/metadata', async (req: Request, res: Response) => {
   const artist = String(req.query.artist || '');
   const title = String(
@@ -500,11 +525,10 @@ if (nameId) {
 
     //console.log('Album API response count:', albums, null, 2);
 
-    console.log('Album API raw response:', JSON.stringify(albumData, null, 2));
+    //console.log('Album API raw response:', JSON.stringify(albumData, null, 2));
   } catch (error) {
     console.warn('Album API fetch failed, falling back to artist payload:', error);
   }
-
 
   //console.log('Discography query parameters:', { resolvedNameId});
   // TRACKS INFORMATION API CALL
@@ -612,7 +636,104 @@ if (nameId) {
   });
 });
 
+app.get('/api/track', async (req, res) => {
+  const trackId = String(req.query.trackId || '');
 
+  if (!trackId) {
+    return res.status(400).json({ error: 'trackId required' });
+  }
+
+  const url = new URL(
+    'https://tivomusicapi-staging-elb.digitalsmiths.net/sd/db9c86353d2aa209/taps/v3/lookup/track'
+  );
+
+  url.searchParams.set('trackId', trackId);
+
+  const response = await fetch(url.toString(), {
+    headers: {
+      'x-tmm-keyid': 'TAC1009',
+      'x-tmm-apikey': 'f18efef12651c9bb089dde93ec28dda4',
+    },
+  });
+
+  const data = await response.json();
+  const raw = data?.hits?.[0];
+
+  if (!raw) {
+    return res.json(null);
+  }
+
+  const composersWithImages = await Promise.all(
+    (raw.composers ?? []).map(async (composer: any) => {
+      try {
+        let apiUrl;
+
+        if (composer.nameId) {
+          apiUrl = new URL(
+            "https://tivomusicapi-staging-elb.digitalsmiths.net/sd/db9c86353d2aa209/taps/v3/lookup/artist"
+          );
+          apiUrl.searchParams.set("nameId", composer.nameId);
+        } else {
+          apiUrl = new URL(
+            "https://tivomusicapi-staging-elb.digitalsmiths.net/sd/db9c86353d2aa209/taps/v3/search/artist"
+          );
+          apiUrl.searchParams.set("name", composer.name);
+        }
+
+        const response = await fetch(apiUrl.toString(), {
+          headers: {
+            "x-tmm-keyid": "TAC1009",
+            "x-tmm-apikey": "f18efef12651c9bb089dde93ec28dda4",
+          },
+        });
+
+        const data = await response.json();
+        const artistInfo = extractArtistInfo(data);
+
+        return {
+          name: composer.name,
+          image: artistInfo.image,
+        };
+
+      } catch (err) {
+        return {
+          name: composer.name,
+          image: null,
+        };
+      }
+    })
+  );
+
+  const track = {
+    id: raw.id,
+    title: raw.title,
+    duration: raw.duration,
+
+    performers: raw.performers
+      ?.filter((p: any) =>
+        p?.role === "Primary Artist" ||
+        p?.role === "Featured Artist"
+      )
+      ?.map((p: any) => p?.name)
+      ?.filter(Boolean) || [],
+
+    composers: composersWithImages, 
+
+    image: raw.images?.[0]?.url
+    ? `/api/image?url=${encodeURIComponent(
+        raw.images[0].url.replace(/&amp;/g, "&")
+      )}`
+    : null,
+
+    genres: raw.song?.[0]?.genres?.map((g: any) => g.name) || [],
+    moods: raw.song?.[0]?.moods?.map((m: any) => m.name) || [],
+    themes: raw.song?.[0]?.themes?.map((t: any) => t.name) || [],
+    year: raw.song?.[0]?.year || null,
+  };
+
+  return res.json(track);
+
+});
 
 // Proxy endpoint to fetch images from Tivo API and stream them back to frontend.
 app.get('/api/image', async (req: Request, res: Response) => {
