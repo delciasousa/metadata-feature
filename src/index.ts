@@ -9,6 +9,64 @@ const PORT = Number(process.env.PORT) || 4000;
 app.use(cors());
 app.use(express.json());
 
+const TIVO_HEADERS = {
+  Accept: '*/*',
+  'x-tmm-keyid': 'TAC1009',
+  'x-tmm-apikey': 'f18efef12651c9bb089dde93ec28dda4',
+};
+
+const TIVO_CACHE_TTL_MS = 60_000;
+const tivoResponseCache = new Map<string, { expiresAt: number; value: unknown }>();
+
+
+// Fetch JSON data from Tivo API with caching and timeout handling
+async function fetchTivoJson(url: URL | string, init: RequestInit = {}) {
+  const cacheKey = `${url.toString()}::${init.method ?? 'GET'}`;
+  const cachedEntry = tivoResponseCache.get(cacheKey);
+
+  if (cachedEntry && cachedEntry.expiresAt > Date.now()) {
+    return cachedEntry.value;
+  }
+
+  if (cachedEntry) {
+    tivoResponseCache.delete(cacheKey);
+  }
+
+  const controller = new AbortController();
+  const timeoutId = setTimeout(() => controller.abort(), 2500);
+
+  try {
+    const response = await fetch(url.toString(), {
+      ...init,
+      headers: {
+        ...TIVO_HEADERS,
+        ...(init.headers as Record<string, string> | undefined),
+      },
+      signal: controller.signal,
+    });
+
+    if (!response.ok) {
+      throw new Error(`Tivo request failed with ${response.status}`);
+    }
+
+    const data = await response.json();
+    tivoResponseCache.set(cacheKey, {
+      expiresAt: Date.now() + TIVO_CACHE_TTL_MS,
+      value: data,
+    });
+
+    return data;
+  } catch (error) {
+    if (error instanceof Error && error.name === 'AbortError') {
+      throw new Error('Tivo request timed out');
+    }
+
+    throw error;
+  } finally {
+    clearTimeout(timeoutId);
+  }
+}
+
 interface ArtistInfo {
   image: string | null;
   images: string[];
@@ -189,26 +247,19 @@ async function fetchReleaseImage(releaseId: string) {
   const url = new URL('https://tivomusicapi-staging-elb.digitalsmiths.net/sd/db9c86353d2aa209/taps/v3/lookup/release');
   url.searchParams.set('releaseId', releaseId);
 
-  const res = await fetch(url.toString(), {
-    headers: {
-      'Accept': '*/*',
-      'x-tmm-keyid': 'TAC1009',
-      'x-tmm-apikey': 'f18efef12651c9bb089dde93ec28dda4',
-    },
-  });
+  try {
+    const data = await fetchTivoJson(url);
+    const rawImage = data.hits?.[0]?.images?.[0]?.url;
 
-  if (!res.ok) return null;
+    if (!rawImage) return null;
 
-  const data = await res.json();
+    const cleaned = rawImage.replace(/&amp;/g, '&');
 
-  const rawImage = data.hits?.[0]?.images?.[0]?.url;
-
-  if (!rawImage) return null;
-
-  const cleaned = rawImage.replace(/&amp;/g, '&');
-
-  // return your proxy URL
-  return `/api/image?url=${encodeURIComponent(cleaned)}`;
+    return `/api/image?url=${encodeURIComponent(cleaned)}`;
+  } catch (error) {
+    console.warn('Release image lookup failed:', error);
+    return null;
+  }
 }
 
 // extract album data
@@ -296,37 +347,29 @@ async function extractAlbumInfo(apiResponse: any): Promise<AlbumInfo[]> {
       const allCredits = await Promise.all(
         rawCredits.map(async (credit) => {
           try {
-            let apiUrl; 
+            let apiUrl;
 
             if (credit.nameID) {
               apiUrl = new URL(
-                "https://tivomusicapi-staging-elb.digitalsmiths.net/sd/db9c86353d2aa209/taps/v3/lookup/artist"
+                'https://tivomusicapi-staging-elb.digitalsmiths.net/sd/db9c86353d2aa209/taps/v3/lookup/artist'
               );
-              apiUrl.searchParams.set("nameId", credit.nameID);
+              apiUrl.searchParams.set('nameId', credit.nameID);
             } else {
               apiUrl = new URL(
-                "https://tivomusicapi-staging-elb.digitalsmiths.net/sd/db9c86353d2aa209/taps/v3/search/artist"
+                'https://tivomusicapi-staging-elb.digitalsmiths.net/sd/db9c86353d2aa209/taps/v3/search/artist'
               );
-              apiUrl.searchParams.set("name", credit.name);
+              apiUrl.searchParams.set('name', credit.name);
             }
 
-            const response = await fetch(apiUrl.toString(), {
-              headers: {
-                "x-tmm-keyid": "TAC1009",
-                "x-tmm-apikey": "f18efef12651c9bb089dde93ec28dda4",
-              },
-            });
-
-            const data = await response.json();
+            const data = await fetchTivoJson(apiUrl);
             const artistInfo = extractArtistInfo(data);
 
             return {
               ...credit,
               image: artistInfo.image,
             };
-
           } catch (err) {
-            console.log("Failed to fetch credit artist:", credit.name);
+            console.log('Failed to fetch credit artist:', credit.name);
 
             return {
               ...credit,
@@ -437,113 +480,67 @@ if (nameId) {
   apiUrl.searchParams.set('name', artist);
 }
 
-  // console.log('Requesting external API:', apiUrl.toString());
-
-  const response = await fetch(apiUrl.toString(), {
-    headers: {
-      'x-tmm-keyid': 'TAC1009',
-      'x-tmm-apikey': 'f18efef12651c9bb089dde93ec28dda4',
-    },
-  });
-
-  const data = await response.json();
-  //console.log('Response:', JSON.stringify(data, null, 2));
+  const data = await fetchTivoJson(apiUrl);
   const artistInfo = extractArtistInfo(data);
   const resolvedNameId = nameId || artistInfo.nameId;
   const artistName = artist || artistInfo.name;
-  
 
   let selectedAlbum: AlbumInfo | null = null;
-
-  if (albumId) {
-    const lookupUrl = new URL(
-      'https://tivomusicapi-staging-elb.digitalsmiths.net/sd/db9c86353d2aa209/taps/v3/lookup/album'
-    );
-
-    lookupUrl.searchParams.set('albumId', albumId);
-
-    const albumRes = await fetch(lookupUrl.toString(), {
-      headers: {
-        'Accept': '*/*',
-        'x-tmm-keyid': 'TAC1009',
-        'x-tmm-apikey': 'f18efef12651c9bb089dde93ec28dda4',
-      },
-    });
-
-    if (albumRes.ok) {
-      const albumData = await albumRes.json();
-      const extracted = await extractAlbumInfo(albumData);
-      selectedAlbum = extracted[0] || null;
-    }
-  }
-  // ALBUMS INFORMATION API CALL
   let albums: AlbumInfo[] = [];
-  try {
-    const albumUrl = new URL(
-      'https://tivomusicapi-staging-elb.digitalsmiths.net/sd/db9c86353d2aa209/taps/v3/search/album'
-    );
-    albumUrl.searchParams.set('title', title);
-    albumUrl.searchParams.set('primaryArtist', artistName);
-    albumUrl.searchParams.set('primaryArtistId', resolvedNameId);
-    albumUrl.searchParams.set('limit', '20');
-    albumUrl.searchParams.set('offset', '0');
-
-    //console.log('Requesting album API:', albumUrl.toString());
-    const albumResponse = await fetch(albumUrl.toString());
-    const albumData = await albumResponse.json();
-    albums = (await extractAlbumInfo(albumData)).filter(album =>
-      Array.isArray(album.flags) &&
-      album.flags.some(flag =>
-        flag.toLowerCase().includes("studio")
-      )
-    );
-    if (selectedAlbum) {
-      const exists = albums.some(a => a.id === selectedAlbum.id);
-
-      if (!exists) {
-        albums.unshift(selectedAlbum); 
-      }
-    }
-    //console.log('Album API response count:', albums, null, 2);
-    //console.log('Album API raw response:', JSON.stringify(albumData, null, 2));
-  } catch (error) {
-    console.warn('Album API fetch failed, falling back to artist payload:', error);
-  }
-
-  //console.log('Discography query parameters:', { resolvedNameId});
-  // TRACKS INFORMATION API CALL
   let trackInfo: TrackInfo[] = [];
-  if (resolvedNameId || title) {
-      const trackUrl = new URL('https://tivomusicapi-staging-elb.digitalsmiths.net/sd/db9c86353d2aa209/taps/v3/lookup/discography');
-      if (resolvedNameId) {  
+  let similarAlbumInfo: SimilarAlbumInfo[] = [];
+
+  const [selectedAlbumResult, albumsResult, trackInfoResult] = await Promise.allSettled([
+    albumId
+      ? (async () => {
+          const lookupUrl = new URL(
+            'https://tivomusicapi-staging-elb.digitalsmiths.net/sd/db9c86353d2aa209/taps/v3/lookup/album'
+          );
+          lookupUrl.searchParams.set('albumId', albumId);
+
+          const albumData = await fetchTivoJson(lookupUrl);
+          const extracted = await extractAlbumInfo(albumData);
+          return extracted[0] || null;
+        })()
+      : Promise.resolve(null),
+    (async () => {
+      const albumUrl = new URL(
+        'https://tivomusicapi-staging-elb.digitalsmiths.net/sd/db9c86353d2aa209/taps/v3/search/album'
+      );
+      albumUrl.searchParams.set('title', title);
+      albumUrl.searchParams.set('primaryArtist', artistName);
+      albumUrl.searchParams.set('primaryArtistId', resolvedNameId);
+      albumUrl.searchParams.set('limit', '20');
+      albumUrl.searchParams.set('offset', '0');
+
+      const albumData = await fetchTivoJson(albumUrl);
+      return (await extractAlbumInfo(albumData)).filter((album) =>
+        Array.isArray(album.flags) &&
+        album.flags.some((flag) => flag.toLowerCase().includes('studio'))
+      );
+    })(),
+    (async () => {
+      if (!resolvedNameId && !title) return [];
+
+      const trackUrl = new URL(
+        'https://tivomusicapi-staging-elb.digitalsmiths.net/sd/db9c86353d2aa209/taps/v3/lookup/discography'
+      );
+      if (resolvedNameId) {
         trackUrl.searchParams.set('nameId', resolvedNameId);
       }
       trackUrl.searchParams.set('type', 'Single');
       trackUrl.searchParams.set('limit', '10');
 
-      
       if (includeAllFields.toLowerCase() === 'true') {
         trackUrl.searchParams.set('includeAllFields', 'true');
       }
 
-      const trackResponse = await fetch(trackUrl.toString(), {
-        headers: {
-          'Accept': '*/*',
-          'x-tmm-keyid': 'TAC1009',
-          'x-tmm-apikey': 'f18efef12651c9bb089dde93ec28dda4',
-        },
-      });
-      
-      if (trackResponse.ok) {
-        const trackData = await trackResponse.json();
+      const trackData = await fetchTivoJson(trackUrl);
+      const singles = (trackData?.hits ?? [])
+        .filter((t: any) => t.type === 'Single')
+        .slice(0, 5);
 
-        //  get singles (from discography)
-        const singles = (trackData?.hits ?? [])
-          .filter((t: any) => t.type === "Single")
-          .slice(0, 5);
-
-        // enrich each single using search/track
-        trackInfo = await Promise.all(
+      const enrichedTracks = await Promise.all(
         singles.map(async (single: any) => {
           try {
             const releaseId = single?.ids?.mainReleaseId;
@@ -552,91 +549,80 @@ if (nameId) {
             const url = new URL(
               'https://tivomusicapi-staging-elb.digitalsmiths.net/sd/db9c86353d2aa209/taps/v3/lookup/release'
             );
-
             url.searchParams.set('releaseId', releaseId);
-            const res = await fetch(url.toString(), {
-              headers: {
-                'Accept': '*/*',
-                'x-tmm-keyid': 'TAC1009',
-                'x-tmm-apikey': 'f18efef12651c9bb089dde93ec28dda4',
-              },
-            });
 
-            if (!res.ok) return null;
-
-            const data = await res.json();
+            const data = await fetchTivoJson(url);
             const raw = data?.hits?.[0];
 
             if (!raw) return null;
 
-            const track = raw.tracks?.[0];  
+            const track = raw.tracks?.[0];
             const image = raw.images?.[0]?.url || null;
-            
 
             return {
-              id: track?.id ?? null,  
+              id: track?.id ?? null,
               title: track?.title || single.title,
               duration: track?.duration ?? single.duration,
               performers: track?.performers
                 ?.filter(
                   (p: any) =>
-                    p?.role === "Primary Artist" ||
-                    p?.role === "Featured Artist"
+                    p?.role === 'Primary Artist' ||
+                    p?.role === 'Featured Artist'
                 )
-                ?.map((p: any) => p?.name)
-                || single.primaryArtists?.map((a: any) => a.name)
-                || [],
-
-              image: image
-              ? `/api/image?url=${encodeURIComponent(image)}`
-              : null,
+                ?.map((p: any) => p?.name) ||
+                single.primaryArtists?.map((a: any) => a.name) ||
+                [],
+              image: image ? `/api/image?url=${encodeURIComponent(image)}` : null,
               albumId: raw?.ids?.albumId ?? single.id,
               releaseId,
             };
-
           } catch (err) {
             console.warn('Release enrichment failed:', single.title);
             return null;
           }
         })
       );
-      trackInfo = trackInfo.filter(Boolean);
-        console.log('Enriched trackInfo:', JSON.stringify(trackInfo, null, 2));
-      }
-      
-    }
-    //console.log('Final metadata response:',JSON.stringify(albums, null, 2));
-    // SIMILAR ALBUMS INFORMATION API CALL
-    let similarAlbumInfo: SimilarAlbumInfo[] = [];
 
-    if (albums.length) {
-      const similarAlbumUrl = new URL(
-        'https://tivomusicapi-staging-elb.digitalsmiths.net/sd/db9c86353d2aa209/taps/v3/recommendations/albumMLT'
-      );
+      return enrichedTracks.filter(Boolean);
+    })(),
+  ]);
+
+  if (selectedAlbumResult.status === 'fulfilled' && selectedAlbumResult.value) {
+    selectedAlbum = selectedAlbumResult.value;
+  }
+
+  if (albumsResult.status === 'fulfilled') {
+    albums = albumsResult.value;
+  }
+
+  if (trackInfoResult.status === 'fulfilled') {
+    trackInfo = trackInfoResult.value as TrackInfo[];
+  }
+
+  if (selectedAlbum) {
+    const exists = albums.some((album) => album.id === selectedAlbum.id);
+    if (!exists) {
+      albums.unshift(selectedAlbum);
+    }
+  }
+
+  if (albums.length) {
+    const similarAlbumUrl = new URL(
+      'https://tivomusicapi-staging-elb.digitalsmiths.net/sd/db9c86353d2aa209/taps/v3/recommendations/albumMLT'
+    );
     const resolvedAlbumId = albumId || albums[0]?.id || '';
 
-    if (resolvedAlbumId ) {
+    if (resolvedAlbumId) {
       similarAlbumUrl.searchParams.set('albumId', resolvedAlbumId);
-    }
-      const res = await fetch(similarAlbumUrl.toString(), {
-        headers: {
-          'Accept': '*/*',
-          'x-tmm-keyid': 'TAC1009',
-          'x-tmm-apikey': 'f18efef12651c9bb089dde93ec28dda4',
-        },
-      });
-
-      if (res.ok) {
-        const data = await res.json();
-        similarAlbumInfo = extractSimilarAlbumsInfo(data)
-        //console.log("FINAL RESPONSE:", {albums,similarAlbums: similarAlbumInfo,});
-        const similarAlbums = extractSimilarAlbumsInfo(data);
-        //console.log("API response:", data);
-        //console.log("Similar albums:", similarAlbums);
-        //console.log('Similar albums:', JSON.stringify(data, null, 2));
+      try {
+        const data = await fetchTivoJson(similarAlbumUrl);
+        similarAlbumInfo = extractSimilarAlbumsInfo(data);
+      } catch (error) {
+        console.warn('Similar album lookup failed:', error);
       }
     }
- 
+  }
+
   return res.json({
     ...artistInfo,
     albums,
@@ -679,31 +665,23 @@ app.get('/api/track', async (req, res) => {
 
         if (composer.nameId) {
           apiUrl = new URL(
-            "https://tivomusicapi-staging-elb.digitalsmiths.net/sd/db9c86353d2aa209/taps/v3/lookup/artist"
+            'https://tivomusicapi-staging-elb.digitalsmiths.net/sd/db9c86353d2aa209/taps/v3/lookup/artist'
           );
-          apiUrl.searchParams.set("nameId", composer.nameId);
+          apiUrl.searchParams.set('nameId', composer.nameId);
         } else {
           apiUrl = new URL(
-            "https://tivomusicapi-staging-elb.digitalsmiths.net/sd/db9c86353d2aa209/taps/v3/search/artist"
+            'https://tivomusicapi-staging-elb.digitalsmiths.net/sd/db9c86353d2aa209/taps/v3/search/artist'
           );
-          apiUrl.searchParams.set("name", composer.name);
+          apiUrl.searchParams.set('name', composer.name);
         }
 
-        const response = await fetch(apiUrl.toString(), {
-          headers: {
-            "x-tmm-keyid": "TAC1009",
-            "x-tmm-apikey": "f18efef12651c9bb089dde93ec28dda4",
-          },
-        });
-
-        const data = await response.json();
+        const data = await fetchTivoJson(apiUrl);
         const artistInfo = extractArtistInfo(data);
 
         return {
           name: composer.name,
           image: artistInfo.image,
         };
-
       } catch (err) {
         return {
           name: composer.name,
@@ -713,18 +691,34 @@ app.get('/api/track', async (req, res) => {
     })
   );
 
+  const performerEntries = [
+    ...(raw.performers ?? [])
+      .filter((p: any) =>
+        p?.role === 'Primary Artist' ||
+        p?.role === 'Featured Artist'
+      )
+      .map((p: any) => ({
+        name: p?.name || '',
+        id: p?.nameID || p?.id || p?.nameId || null,
+      }))
+      .filter((p: any) => p.name),
+    ...(raw.primaryArtists ?? []).map((artist: any) => ({
+      name: artist?.name || '',
+      id: artist?.nameID || artist?.id || artist?.nameId || null,
+    })),
+  ];
+
+  const uniquePerformers = performerEntries.filter(
+    (performer: { name: string; id: string | null }, index: number, list: { name: string; id: string | null }[]) =>
+      list.findIndex((entry) => entry.name === performer.name && entry.id === performer.id) === index
+  );
+
   const track = {
     id: raw.id,
     title: raw.title,
     duration: raw.duration,
     albumId: raw.ids?.albumId  || null,
-    performers: raw.performers
-      ?.filter((p: any) =>
-        p?.role === "Primary Artist" ||
-        p?.role === "Featured Artist"
-      )
-      ?.map((p: any) => p?.name)
-      ?.filter(Boolean) || [],
+    performers: uniquePerformers,
 
     composers: composersWithImages, 
 
