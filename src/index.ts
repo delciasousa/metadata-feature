@@ -36,6 +36,7 @@ interface AlbumInfo {
   genres: string[] | null;
   tracks: Track[];
   allCredits: Credit[];
+  subgenres: string[] | null;
 
 }
 
@@ -46,6 +47,7 @@ interface TrackInfo {
   performers: string[];
   image: string | null;
   albumId: string | null;
+  releaseId: string;
 }
 
 interface  SimilarAlbumInfo{
@@ -72,62 +74,39 @@ type Track = {
 
 
 
-// extract track metadata from TiVo API response and return the first 5 singles
-function extractTrackInfo(apiResponse: any): TrackInfo[] {
-  const tracks = Array.isArray(apiResponse?.hits) ? apiResponse.hits : [];
-
-  return tracks.slice(1, 6).map((track: any) =>
-    normalizeTrack(track)
-  );
-}
 
 function normalizeTrack(track: any, image: string | null = null) {
-  const performers = Array.isArray(track.primaryArtists)
-    ? track.primaryArtists.map((a: any) => a?.name).filter(Boolean)
-    : Array.isArray(track.performers)
-    ? track.performers
-        .filter(
-          (p: any) =>
-            p?.role === "Primary Artist" ||
-            p?.role === "Featured Artist"
-        )
-        .map((p: any) => p?.name)
-    : [];
+  let performers: string[] = [];
+
+  if (Array.isArray(track.performers)) {
+    performers = track.performers
+      .filter(
+        (p: any) =>
+          p?.role === "Primary Artist" ||
+          p?.role === "Featured Artist"
+      )
+      .map((p: any) => p?.name)
+      .filter(Boolean);
+
+  } else if (Array.isArray(track.primaryArtists)) {
+    performers = track.primaryArtists
+      .map((a: any) => a?.name)
+      .filter(Boolean);
+  }
+  performers = [...new Set(performers)];
 
   return {
-    id: track?.id ?? track?.ids?.trackId ?? "",
-    title: track?.title || track?.name || "",
+    id: track?.ids?.mainTrackId ?? track?.id ?? null,
+    title: track?.title || "",
     duration: track?.duration ?? 0,
     performers,
-    image,
-    albumId: track?.ids?.mainReleaseId ?? null,
+    image: image || track?.images?.[0]?.url || null,
+    albumId:
+      track?.album?.[0]?.id ??
+      track?.release?.[0]?.ids?.albumId ??
+      null,
+    releaseId: track?.ids?.mainReleaseId ?? null,
   };
-}
-
-function normalizeFullTrack(raw: any) {
-  return raw
-    ? {
-        id: raw.id,
-        title: raw.title,
-        duration: raw.duration ?? 0,
-
-        performers: raw.performers
-          ?.map((p: any) => p?.name)
-          ?.filter(Boolean) || [],
-
-        image: raw.images?.[0]?.url
-          ? `/api/image?url=${encodeURIComponent(
-              raw.images[0].url.replace(/&amp;/g, "&")
-            )}`
-          : null,
-
-        albumId: raw.ids?.albumId ?? null,
-        genres: raw.song?.[0]?.genres?.map((g: any) => g.name) || [],
-        moods: raw.song?.[0]?.moods?.map((m: any) => m.name) || [],
-        themes: raw.song?.[0]?.themes?.map((t: any) => t.name) || [],
-        year: raw.song?.[0]?.year ?? null,
-      }
-    : null;
 }
 
 // extract relevant metadata from TiVo API response and adapt to our interface.
@@ -265,6 +244,9 @@ async function extractAlbumInfo(apiResponse: any): Promise<AlbumInfo[]> {
 
       const genres =
         album.genres?.map((genre: any) => genre.name) || [];
+
+      const subgenres =
+        album.subGenres?.map((subgenre: any) => subgenre.name) || [];
       
       const albumId = album.id;
       const albumImage = imageUrl
@@ -366,6 +348,7 @@ async function extractAlbumInfo(apiResponse: any): Promise<AlbumInfo[]> {
         genres,
         tracks,
         allCredits, 
+        subgenres,
       };
     })
   );
@@ -514,7 +497,6 @@ if (nameId) {
         flag.toLowerCase().includes("studio")
       )
     );
-
     if (selectedAlbum) {
       const exists = albums.some(a => a.id === selectedAlbum.id);
 
@@ -522,9 +504,7 @@ if (nameId) {
         albums.unshift(selectedAlbum); 
       }
     }
-
     //console.log('Album API response count:', albums, null, 2);
-
     //console.log('Album API raw response:', JSON.stringify(albumData, null, 2));
   } catch (error) {
     console.warn('Album API fetch failed, falling back to artist payload:', error);
@@ -556,43 +536,72 @@ if (nameId) {
       
       if (trackResponse.ok) {
         const trackData = await trackResponse.json();
-        //console.log('Track API raw response:', JSON.stringify(trackData, null, 2));
-        trackInfo = extractTrackInfo(trackData);
 
-        // enrich singles with release images
+        //  get singles (from discography)
+        const singles = (trackData?.hits ?? [])
+          .filter((t: any) => t.type === "Single")
+          .slice(0, 5);
+
+        // enrich each single using search/track
         trackInfo = await Promise.all(
-          trackInfo.map(async (track) => {
-            if (!track.albumId) return track;
+        singles.map(async (single: any) => {
+          try {
+            const releaseId = single?.ids?.mainReleaseId;
+            if (!releaseId) return null;
 
-            try {
-              const url = new URL('https://tivomusicapi-staging-elb.digitalsmiths.net/sd/db9c86353d2aa209/taps/v3/lookup/release');
-              url.searchParams.set('releaseId', track.albumId);
+            const url = new URL(
+              'https://tivomusicapi-staging-elb.digitalsmiths.net/sd/db9c86353d2aa209/taps/v3/lookup/release'
+            );
 
-              const res = await fetch(url.toString(), {
-                headers: {
-                  'Accept': '*/*',
-                  'x-tmm-keyid': 'TAC1009',
-                  'x-tmm-apikey': 'f18efef12651c9bb089dde93ec28dda4',
-                },
-              });
-              
-              if (!res.ok) return track;
+            url.searchParams.set('releaseId', releaseId);
+            const res = await fetch(url.toString(), {
+              headers: {
+                'Accept': '*/*',
+                'x-tmm-keyid': 'TAC1009',
+                'x-tmm-apikey': 'f18efef12651c9bb089dde93ec28dda4',
+              },
+            });
 
-              const data = await res.json();
-              //console.log('Release lookup response:', JSON.stringify(data, null, 1));
+            if (!res.ok) return null;
 
-              const image = await fetchReleaseImage(track.albumId);
-              return {
-                ...track,
-                image, 
-              };
-            } catch (err) {
-              console.warn('Error fetching release image:', err);
-              return track;
-            }
-          })
-        );
-        //console.log('Enriched trackInfo:', JSON.stringify(trackInfo, null, 2));
+            const data = await res.json();
+            const raw = data?.hits?.[0];
+
+            if (!raw) return null;
+
+            const track = raw.tracks?.[0];  
+            const image = raw.images?.[0]?.url || null;
+            
+
+            return {
+              id: track?.id ?? null,  
+              title: track?.title || single.title,
+              duration: track?.duration ?? single.duration,
+              performers: track?.performers
+                ?.filter(
+                  (p: any) =>
+                    p?.role === "Primary Artist" ||
+                    p?.role === "Featured Artist"
+                )
+                ?.map((p: any) => p?.name)
+                || single.primaryArtists?.map((a: any) => a.name)
+                || [],
+
+              image: image
+              ? `/api/image?url=${encodeURIComponent(image)}`
+              : null,
+              albumId: raw?.ids?.albumId ?? single.id,
+              releaseId,
+            };
+
+          } catch (err) {
+            console.warn('Release enrichment failed:', single.title);
+            return null;
+          }
+        })
+      );
+      trackInfo = trackInfo.filter(Boolean);
+        console.log('Enriched trackInfo:', JSON.stringify(trackInfo, null, 2));
       }
       
     }
@@ -708,7 +717,7 @@ app.get('/api/track', async (req, res) => {
     id: raw.id,
     title: raw.title,
     duration: raw.duration,
-
+    albumId: raw.ids?.albumId  || null,
     performers: raw.performers
       ?.filter((p: any) =>
         p?.role === "Primary Artist" ||

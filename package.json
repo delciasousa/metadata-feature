@@ -14,7 +14,9 @@
   "type": "module",
   "dependencies": {
     "cors": "^2.8.6",
-    "express": "^5.2.1"
+    "express": "^5.2.1",
+    "react-loading": "^2.0.3",
+    "react-lottie": "^1.2.10"
   },
   "devDependencies": {
     "@types/cors": "^2.8.19",
