@@ -46,8 +46,6 @@ async function fetchTivoJson(url: URL | string, init: RequestInit = {}) {
       signal: controller.signal,
       
     });
-    console.log(`Request took ${Date.now() - start}ms`);
-
     if (!response.ok) {
       throw new Error(`Tivo request failed with ${response.status}`);
     }
@@ -108,6 +106,9 @@ interface TrackInfo {
   performers: string[];
   image: string | null;
   albumId: string | null;
+  albumName: string | null;
+  albumImage: string | null;
+  albumReleaseDate: string | null;
   releaseId: string;
 }
 
@@ -708,21 +709,44 @@ app.get('/api/track', async (req, res) => {
       list.findIndex((entry) => entry.name === performer.name && entry.id === performer.id) === index
   );
 
+  const albumId = raw.ids?.albumId || raw.release?.[0]?.ids?.albumId || null;
+  let albumName: string | null = null;
+  let albumImage: string | null = null;
+  let albumReleaseDate: string | null = null;
+
+  if (albumId) {
+    try {
+      const albumLookupUrl = new URL(
+        'https://tivomusicapi-staging-elb.digitalsmiths.net/sd/db9c86353d2aa209/taps/v3/lookup/album'
+      );
+      albumLookupUrl.searchParams.set('albumId', albumId);
+
+      const albumData = await fetchTivoJson(albumLookupUrl);
+      const albumInfo = (await extractAlbumInfo(albumData))[0];
+
+      albumName = albumInfo?.title ?? null;
+      albumImage = albumInfo?.image ?? null;
+      albumReleaseDate = albumInfo?.releaseDate ?? null;
+    } catch (err) {
+      console.warn('Album enrichment failed for track:', trackId, err);
+    }
+  }
+
   const track = {
     id: raw.id,
     title: raw.title,
     duration: raw.duration,
-    albumId: raw.ids?.albumId  || null,
+    albumId,
+    albumName,
+    albumImage,
+    albumReleaseDate,
     performers: uniquePerformers,
-
     composers: composersWithImages, 
-
     image: raw.images?.[0]?.url
     ? `/api/image?url=${encodeURIComponent(
         raw.images[0].url.replace(/&amp;/g, "&")
       )}`
     : null,
-
     genres: raw.song?.[0]?.genres?.map((g: any) => g.name) || [],
     moods: raw.song?.[0]?.moods?.map((m: any) => m.name) || [],
     themes: raw.song?.[0]?.themes?.map((t: any) => t.name) || [],
@@ -730,7 +754,6 @@ app.get('/api/track', async (req, res) => {
   };
 
   return res.json(track);
-
 });
 
 // Proxy endpoint to fetch images from Tivo API and stream them back to frontend.
