@@ -33,7 +33,7 @@ async function fetchTivoJson(url: URL | string, init: RequestInit = {}) {
   }
 
   const controller = new AbortController();
-  const timeoutId = setTimeout(() => controller.abort(), 2500);
+  const timeoutId = setTimeout(() => controller.abort(), 10000);
 
   try {
     const response = await fetch(url.toString(), {
@@ -346,7 +346,7 @@ async function extractAlbumInfo(apiResponse: any): Promise<AlbumInfo[]> {
       ];
       const allCredits = await Promise.all(
         rawCredits.map(async (credit) => {
-          try {
+   
             let apiUrl;
 
             if (credit.nameID) {
@@ -368,14 +368,6 @@ async function extractAlbumInfo(apiResponse: any): Promise<AlbumInfo[]> {
               ...credit,
               image: artistInfo.image,
             };
-          } catch (err) {
-            console.log('Failed to fetch credit artist:', credit.name);
-
-            return {
-              ...credit,
-              image: null,
-            };
-          }
         })
       );
       
