@@ -36,6 +36,7 @@ async function fetchTivoJson(url: URL | string, init: RequestInit = {}) {
   const timeoutId = setTimeout(() => controller.abort(), 10000);
 
   try {
+    const start = Date.now();
     const response = await fetch(url.toString(), {
       ...init,
       headers: {
@@ -43,7 +44,9 @@ async function fetchTivoJson(url: URL | string, init: RequestInit = {}) {
         ...(init.headers as Record<string, string> | undefined),
       },
       signal: controller.signal,
+      
     });
+    console.log(`Request took ${Date.now() - start}ms`);
 
     if (!response.ok) {
       throw new Error(`Tivo request failed with ${response.status}`);
